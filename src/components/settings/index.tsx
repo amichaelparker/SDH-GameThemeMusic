@@ -4,6 +4,7 @@ import {
   DropdownItem,
   Menu,
   MenuItem,
+  Navigation,
   PanelSection,
   PanelSectionRow,
   ProgressBarWithInfo,
@@ -15,6 +16,7 @@ import {
   ToggleField
 } from '@decky/ui'
 import { useMemo } from 'react'
+import { getCurrentLibraryAppId } from '../../state/currentApp'
 import { SiCrowdin, SiDiscord, SiGithub, SiKofi } from "react-icons/si";
 import { useSettings } from '../../hooks/useSettings'
 import useTranslations from '../../hooks/useTranslations'
@@ -168,8 +170,22 @@ export default function Index() {
     })
   }
 
+  const currentAppId = getCurrentLibraryAppId()
+
   return (
     <div>
+      {currentAppId && (
+        <PanelSection>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={() => Navigation.Navigate(`/gamethememusic/${currentAppId}`)}
+            >
+              {t('changeThemeMusic')}
+            </ButtonItem>
+          </PanelSectionRow>
+        </PanelSection>
+      )}
       <PanelSection title={t('settings')}>
         <PanelSectionRow>
           <SliderField

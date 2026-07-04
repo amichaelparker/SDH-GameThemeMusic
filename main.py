@@ -2,9 +2,12 @@ import asyncio
 import base64
 import datetime
 import glob
+import io
 import json
 import os
 import ssl
+import zipfile
+from pathlib import Path
 
 import aiohttp
 import certifi
@@ -25,6 +28,43 @@ class Plugin:
         self.settings = SettingsManager(
             name="config", settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR
         )
+        asyncio.ensure_future(self._ensure_binaries())
+
+    async def _ensure_binaries(self):
+        bin_dir = Path(f"{decky.DECKY_PLUGIN_DIR}/bin")
+        bin_dir.mkdir(exist_ok=True)
+
+        yt_dlp = bin_dir / "yt-dlp"
+        if not yt_dlp.exists():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp",
+                        ssl=self.ssl_context
+                    ) as resp:
+                        resp.raise_for_status()
+                        with open(yt_dlp, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(65536):
+                                f.write(chunk)
+                yt_dlp.chmod(0o755)
+            except Exception:
+                pass
+
+        deno = bin_dir / "deno"
+        if not deno.exists():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip",
+                        ssl=self.ssl_context
+                    ) as resp:
+                        resp.raise_for_status()
+                        data = await resp.read()
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    z.extract("deno", bin_dir)
+                deno.chmod(0o755)
+            except Exception:
+                pass
 
     async def _unload(self):
         # Add a check to make sure the process is still running before trying to terminate to avoid ProcessLookupError
@@ -46,6 +86,13 @@ class Plugin:
         return self.settings.getSetting(key, default)
 
     async def search_yt(self, term: str):
+        # Make sure the yt-dlp binary is executable
+        try:
+            path = Path(f"{decky.DECKY_PLUGIN_DIR}/bin/yt-dlp")
+            path.chmod(0o755) if path.exists() else None
+        except:
+            exit(1)
+
         # Add a check to make sure the process is still running before trying to terminate to avoid ProcessLookupError
         if self.yt_process is not None and self.yt_process.returncode is None:
             self.yt_process.terminate()
@@ -63,6 +110,7 @@ class Plugin:
             stdout=asyncio.subprocess.PIPE,
             # The returned JSON can get rather big, so we set a generous limit of 10 MB.
             limit=10 * 1024**2,
+            env={**os.environ, "LD_LIBRARY_PATH": "/usr/lib:/usr/lib64:/lib:/lib64", "PATH": f"{decky.DECKY_PLUGIN_DIR}/bin:" + os.environ.get("PATH", "/usr/bin:/bin")},
         )
 
     async def next_yt_result(self):
@@ -98,29 +146,17 @@ class Plugin:
         return local_matches[0]
 
     async def single_yt_url(self, id: str):
+        # Download first if not available locally — streaming URLs from yt-dlp
+        # fail to play in Steam's CEF context, but base64 data URLs work reliably.
         local_match = self.local_match(id)
+        if local_match is None:
+            await self.download_yt_audio(id)
+            local_match = self.local_match(id)
         if local_match is not None:
-            # The audio has already been downloaded, so we can just use that one.
-            # However, we cannot use local paths in the <audio> elements, so we'll
-            # convert this to a base64-encoded data URL first.
             extension = local_match.split(".")[-1]
             with open(local_match, "rb") as file:
                 return f"data:audio/{extension};base64,{base64.b64encode(file.read()).decode()}"
-        result = await asyncio.create_subprocess_exec(
-            f"{decky.DECKY_PLUGIN_DIR}/bin/yt-dlp",
-            f"{id}",
-            "-j",
-            "-f",
-            "bestaudio",
-            stdout=asyncio.subprocess.PIPE,
-        )
-        if (
-            result.stdout is None
-            or len(output := (await result.stdout.read()).strip()) == 0
-        ):
-            return None
-        entry = json.loads(output)
-        return entry["url"]
+        return None
 
     async def download_yt_audio(self, id: str):
         if self.local_match(id) is not None:
@@ -135,8 +171,16 @@ class Plugin:
             "%(id)s.%(ext)s",
             "-P",
             self.music_path,
+            env={**os.environ, "LD_LIBRARY_PATH": "/usr/lib:/usr/lib64:/lib:/lib64", "PATH": f"{decky.DECKY_PLUGIN_DIR}/bin:" + os.environ.get("PATH", "/usr/bin:/bin")},
         )
         await process.communicate()
+
+        # Simple fix to make any lingering m4a files usable. Does nothing if fails.
+        music_path = Path(self.music_path)
+        try:
+            (f"{music_path}/{id}.m4a").rename(f"{music_path}/{id}.webm")
+        except:
+            pass
 
     async def download_url(self, url: str, id: str):
         async with aiohttp.ClientSession() as session:

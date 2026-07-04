@@ -110,24 +110,83 @@ const contextMenuPatch = (LibraryContextMenu: any) => {
 
 /**
  * Game context menu component.
+ *
+ * Newer Steam clients store Symbol values in React contexts. fakeRenderComponent
+ * stubs useContext as `(cb) => cb._currentValue`, which returns the Symbol. When the
+ * component then uses that value in a string context it throws "Cannot convert a symbol".
+ *
+ * Fix: pass a safe useContext override that converts Symbol context values to null,
+ * and broaden the search to also match without the `()` call syntax in case Steam
+ * minification changed the pattern.
  */
-export const LibraryContextMenu = fakeRenderComponent(
-  findModuleChild((m) => {
-    if (typeof m !== 'object') return
-    for (const prop in m) {
-      if (
-        m[prop]?.toString() &&
-        m[prop].toString().includes('().LibraryContextMenu')
-      ) {
-        return Object.values(m).find(
-          (sibling) =>
-            sibling?.toString().includes('createElement') &&
-            sibling?.toString().includes('navigator:')
-        )
-      }
+function findLibraryContextMenu() {
+  // Safe useContext: Symbol context values become null instead of throwing.
+  const safeUseContext = (cb: any) => {
+    const val = cb?._currentValue
+    return typeof val === 'symbol' ? null : val
+  }
+
+  // Search strategy 1: original pattern `().LibraryContextMenu`
+  // Search strategy 2: broader — any reference to `LibraryContextMenu`
+  for (const pattern of ['().LibraryContextMenu', 'LibraryContextMenu']) {
+    try {
+      const result = fakeRenderComponent(
+        findModuleChild((m) => {
+          if (typeof m !== 'object') return
+          for (const prop in m) {
+            try {
+              if (
+                typeof m[prop] === 'function' &&
+                m[prop].toString().includes(pattern)
+              ) {
+                return Object.values(m).find(
+                  (sibling: any) =>
+                    typeof sibling === 'function' &&
+                    sibling.toString().includes('createElement') &&
+                    sibling.toString().includes('navigator:')
+                )
+              }
+            } catch (_) {}
+          }
+          return
+        }),
+        { useContext: safeUseContext }
+      )?.type
+      if (result) return result
+    } catch (e) {
+      console.error(`[GameThemeMusic] Strategy "${pattern}" failed:`, e)
     }
-    return
-  })
-).type
+  }
+
+  // Strategy 3: find class component directly by prototype signature, no fakeRender needed
+  try {
+    const direct = findModuleChild((m) => {
+      if (typeof m !== 'object') return
+      for (const prop in m) {
+        try {
+          const val = m[prop]
+          if (
+            typeof val === 'function' &&
+            val?.prototype?.render &&
+            val?.prototype?.shouldComponentUpdate &&
+            (val.displayName?.includes('LibraryContextMenu') ||
+              val.name?.includes('LibraryContextMenu'))
+          ) {
+            return val
+          }
+        } catch (_) {}
+      }
+      return
+    })
+    if (direct) return direct
+  } catch (e) {
+    console.error('[GameThemeMusic] Strategy "direct" failed:', e)
+  }
+
+  console.error('[GameThemeMusic] All strategies failed — context menu patch disabled')
+  return undefined
+}
+
+export const LibraryContextMenu = findLibraryContextMenu()
 
 export default contextMenuPatch
